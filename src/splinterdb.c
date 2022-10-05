@@ -736,10 +736,6 @@ splinterdb_update(const splinterdb *kvsb, slice key, slice update)
  * _splinterdb_lookup_result structure --
  *-----------------------------------------------------------------------------
  */
-typedef struct {
-   merge_accumulator value;
-} _splinterdb_lookup_result;
-
 _Static_assert(sizeof(_splinterdb_lookup_result)
                   <= sizeof(splinterdb_lookup_result),
                "sizeof(splinterdb_lookup_result) is too small");
