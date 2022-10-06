@@ -188,8 +188,54 @@ static void
 insert_into_write_set(transaction_internal *txn_internal,
                       slice                 key,
                       message_type          op,
-                      slice                 value)
+                      slice                 value,
+                      const data_config    *cfg)
 {
+   // check if there is the same key in its write set
+   for (uint64 i = 0; i < txn_internal->ws_size; ++i) {
+      if (data_key_compare(cfg, key, txn_internal->ws[i].key) == 0) {
+         if (op == MESSAGE_TYPE_INSERT) {
+            writable_buffer value_buf;
+            writable_buffer_init_with_buffer(
+               &value_buf,
+               0,
+               message_length(txn_internal->ws[i].msg),
+               (void *)message_data(txn_internal->ws[i].msg),
+               message_length(txn_internal->ws[i].msg));
+            writable_buffer_copy_slice(&value_buf, value);
+
+            txn_internal->ws[i].msg =
+               message_create(op, writable_buffer_to_slice(&value_buf));
+         } else if (op == MESSAGE_TYPE_DELETE) {
+            txn_internal->ws[i].msg = DELETE_MESSAGE;
+         } else if (op == MESSAGE_TYPE_UPDATE) {
+            merge_accumulator new_msg;
+            merge_accumulator_init_from_message(
+               &new_msg, 0, message_create(op, value));
+
+            data_merge_tuples(cfg, key, txn_internal->ws[i].msg, &new_msg);
+
+            writable_buffer value_buf;
+            writable_buffer_init_with_buffer(
+               &value_buf,
+               0,
+               message_length(txn_internal->ws[i].msg),
+               (void *)message_data(txn_internal->ws[i].msg),
+               message_length(txn_internal->ws[i].msg));
+            writable_buffer_copy_slice(&value_buf,
+                                       merge_accumulator_to_value(&new_msg));
+
+            txn_internal->ws[i].msg =
+               message_create(merge_accumulator_message_class(&new_msg),
+                              writable_buffer_to_slice(&value_buf));
+
+            merge_accumulator_deinit(&new_msg);
+         }
+
+         return;
+      }
+   }
+
    writable_buffer key_buf;
    writable_buffer_init_from_slice(&key_buf, 0, key);
    txn_internal->ws[txn_internal->ws_size].key =
@@ -227,7 +273,11 @@ transactional_splinterdb_insert(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_INSERT, value);
+   insert_into_write_set(txn_internal,
+                         key,
+                         MESSAGE_TYPE_INSERT,
+                         value,
+                         txn_kvsb->tcfg->kvsb_cfg.data_cfg);
 
    return 0;
 }
@@ -240,7 +290,11 @@ transactional_splinterdb_delete(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_DELETE, NULL_SLICE);
+   insert_into_write_set(txn_internal,
+                         key,
+                         MESSAGE_TYPE_DELETE,
+                         NULL_SLICE,
+                         txn_kvsb->tcfg->kvsb_cfg.data_cfg);
 
    return 0;
 }
@@ -254,7 +308,11 @@ transactional_splinterdb_update(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_UPDATE, delta);
+   insert_into_write_set(txn_internal,
+                         key,
+                         MESSAGE_TYPE_UPDATE,
+                         delta,
+                         txn_kvsb->tcfg->kvsb_cfg.data_cfg);
 
    return 0;
 }
