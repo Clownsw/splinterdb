@@ -62,23 +62,8 @@ transactional_splinterdb_register_thread(transactional_splinterdb *kvs);
 void
 transactional_splinterdb_deregister_thread(transactional_splinterdb *kvs);
 
-#define TRANSACTION_RW_SET_MAX 16
-
-typedef struct transaction_rw_set_entry {
-   slice   key;
-   message msg;
-} transaction_rw_set_entry;
-
 typedef struct transaction {
-   timestamp start_ts;
-   timestamp val_ts;
-   timestamp fin_ts;
-
-   transaction_rw_set_entry rs[TRANSACTION_RW_SET_MAX];
-   transaction_rw_set_entry ws[TRANSACTION_RW_SET_MAX];
-
-   uint64 rs_size;
-   uint64 ws_size;
+   void *internal;
 } transaction;
 
 int
@@ -124,5 +109,18 @@ transactional_splinterdb_lookup_result_init(
    uint64                    buffer_len, // IN
    char                     *buffer      // IN
 );
+
+typedef enum {
+   TRANSACTION_ISOLATION_LEVEL_INVALID = 0,
+   TRANSACTION_ISOLATION_LEVEL_SERIALIZABLE,
+   TRANSACTION_ISOLATION_LEVEL_SNAPSHOT,
+   TRANSACTION_ISOLATION_LEVEL_REPEATABLE_READ,
+   TRANSACTION_ISOLATION_LEVEL_MAX_VALID
+} transaction_isolation_level;
+
+void
+transactional_splinterdb_set_isolation_level(
+   transactional_splinterdb   *txn_kvsb,
+   transaction_isolation_level isol_level);
 
 #endif // _TRANSACTION_H_
