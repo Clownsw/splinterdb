@@ -18,9 +18,9 @@ typedef struct transaction_rw_set_entry {
 } transaction_rw_set_entry;
 
 typedef struct transaction_internal {
-   timestamp start_ts;
-   timestamp val_ts;
-   timestamp fin_ts;
+   timestamp start_tn;
+   timestamp finish_tn;
+   timestamp tn;
 
    transaction_rw_set_entry rs[TRANSACTION_RW_SET_MAX];
    transaction_rw_set_entry ws[TRANSACTION_RW_SET_MAX];

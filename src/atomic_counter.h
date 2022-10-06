@@ -7,7 +7,7 @@
 #include "splinterdb/public_platform.h"
 
 typedef struct atomic_counter {
-   timestamp num;
+   uint64 num;
 } atomic_counter;
 
 void
@@ -16,7 +16,10 @@ atomic_counter_init(atomic_counter *counter);
 void
 atomic_counter_deinit(atomic_counter *counter);
 
-timestamp
+uint64
 atomic_counter_get_next(atomic_counter *counter);
+
+uint64
+atomic_counter_get_current(atomic_counter *counter);
 
 #endif // _ATOMIC_COUNTER_H_

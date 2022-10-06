@@ -12,7 +12,8 @@ typedef struct transactional_splinterdb {
    splinterdb                      *kvsb;
    transactional_splinterdb_config *tcfg;
    atomic_counter                   ts_allocator;
-   transaction_table                active_transactions;
+   transaction_table                all_transactions;
+   platform_mutex                   lock;
 } transactional_splinterdb;
 
 static int
@@ -38,7 +39,8 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
    }
 
    atomic_counter_init(&_txn_kvsb->ts_allocator);
-   transaction_table_init(&_txn_kvsb->active_transactions);
+   transaction_table_init(&_txn_kvsb->all_transactions);
+   platform_mutex_init(&_txn_kvsb->lock, 0, 0);
 
    *txn_kvsb = _txn_kvsb;
 
@@ -65,7 +67,8 @@ transactional_splinterdb_close(transactional_splinterdb **txn_kvsb)
    transactional_splinterdb *_txn_kvsb = *txn_kvsb;
    splinterdb_close(&_txn_kvsb->kvsb);
 
-   transaction_table_deinit(&_txn_kvsb->active_transactions);
+   platform_mutex_destroy(&_txn_kvsb->lock);
+   transaction_table_deinit(&_txn_kvsb->all_transactions);
    atomic_counter_deinit(&_txn_kvsb->ts_allocator);
 
    platform_free(0, _txn_kvsb->tcfg);
@@ -94,37 +97,19 @@ transactional_splinterdb_begin(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal;
    transaction_internal_create(&txn_internal);
 
-   txn->internal = txn_internal;
-
    // Get a new timestamp from a global atomic counter
-   txn_internal->start_ts = atomic_counter_get_next(&txn_kvsb->ts_allocator);
+   txn_internal->start_tn = atomic_counter_get_current(&txn_kvsb->ts_allocator);
 
-   // Insert the new transaction into the active transaction table
-   transaction_table_insert(&txn_kvsb->active_transactions, txn_internal);
+
+   txn->internal = txn_internal;
 
    return 0;
 }
 
-int
-transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
-                                transaction              *txn)
+static void
+write_into_splinterdb(transactional_splinterdb *txn_kvsb,
+                      transaction_internal     *txn_internal)
 {
-   transaction_internal *txn_internal = txn->internal;
-   platform_assert(txn_internal != NULL);
-
-   txn_internal->val_ts = atomic_counter_get_next(&txn_kvsb->ts_allocator);
-
-   bool is_conflict =
-      transaction_check_for_conflict(&txn_kvsb->active_transactions,
-                                     txn_internal,
-                                     txn_kvsb->tcfg->kvsb_cfg.data_cfg);
-
-   if (is_conflict) {
-      transaction_table_delete(&txn_kvsb->active_transactions, txn_internal);
-      transaction_internal_destroy((transaction_internal **)&txn->internal);
-      return -1;
-   }
-
    int rc = 0;
 
    // Write all elements in txn->ws
@@ -150,11 +135,40 @@ transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
             platform_assert(0, "invalid operation");
       }
    }
+}
 
-   // FIXME: when committed transactions can be deleted?
-   // transaction_clean_up(txn);
+int
+transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
+                                transaction              *txn)
+{
+   transaction_internal *txn_internal = txn->internal;
+   platform_assert(txn_internal != NULL);
 
-   txn_internal->fin_ts = atomic_counter_get_next(&txn_kvsb->ts_allocator);
+   platform_mutex_lock(&txn_kvsb->lock);
+
+   txn_internal->finish_tn =
+      atomic_counter_get_current(&txn_kvsb->ts_allocator);
+   bool valid =
+      transaction_check_for_conflict(&txn_kvsb->all_transactions,
+                                     txn_internal,
+                                     txn_kvsb->tcfg->kvsb_cfg.data_cfg);
+
+   if (valid) {
+      // The new transaction finally becomes visible globally
+      transaction_table_insert(&txn_kvsb->all_transactions, txn_internal);
+
+      write_into_splinterdb(txn_kvsb, txn_internal);
+      txn_internal->tn = atomic_counter_get_next(&txn_kvsb->ts_allocator);
+   }
+
+   platform_mutex_unlock(&txn_kvsb->lock);
+
+   if (!valid) {
+      transaction_internal_destroy((transaction_internal **)&txn->internal);
+      return -1;
+   }
+
+   // TODO: Garbage collection
 
    return 0;
 }
@@ -165,7 +179,6 @@ transactional_splinterdb_abort(transactional_splinterdb *txn_kvsb,
 {
    platform_assert(txn->internal != NULL);
 
-   transaction_table_delete(&txn_kvsb->active_transactions, txn->internal);
    transaction_internal_destroy((transaction_internal **)&txn->internal);
 
    return 0;
