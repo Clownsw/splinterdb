@@ -184,6 +184,40 @@ transactional_splinterdb_abort(transactional_splinterdb *txn_kvsb,
    return 0;
 }
 
+static void
+insert_into_write_set(transaction_internal *txn_internal,
+                      slice                 key,
+                      message_type          op,
+                      slice                 value)
+{
+   writable_buffer key_buf;
+   writable_buffer_init_from_slice(&key_buf, 0, key);
+   txn_internal->ws[txn_internal->ws_size].key =
+      writable_buffer_to_slice(&key_buf);
+
+   if (op == MESSAGE_TYPE_DELETE) {
+      txn_internal->ws[txn_internal->ws_size].msg = DELETE_MESSAGE;
+   } else {
+      writable_buffer value_buf;
+      writable_buffer_init_from_slice(&value_buf, 0, value);
+      txn_internal->ws[txn_internal->ws_size].msg =
+         message_create(op, writable_buffer_to_slice(&value_buf));
+   }
+
+   ++txn_internal->ws_size;
+}
+
+static void
+insert_into_read_set(transaction_internal *txn_internal, slice key)
+{
+   writable_buffer key_buf;
+   writable_buffer_init_from_slice(&key_buf, 0, key);
+   txn_internal->rs[txn_internal->rs_size].key =
+      writable_buffer_to_slice(&key_buf);
+
+   ++txn_internal->rs_size;
+}
+
 int
 transactional_splinterdb_insert(transactional_splinterdb *txn_kvsb,
                                 transaction              *txn,
@@ -193,17 +227,7 @@ transactional_splinterdb_insert(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   writable_buffer key_buf;
-   writable_buffer_init_from_slice(&key_buf, 0, key);
-   txn_internal->ws[txn_internal->ws_size].key =
-      writable_buffer_to_slice(&key_buf);
-
-   writable_buffer value_buf;
-   writable_buffer_init_from_slice(&value_buf, 0, value);
-   txn_internal->ws[txn_internal->ws_size].msg =
-      message_create(MESSAGE_TYPE_INSERT, writable_buffer_to_slice(&value_buf));
-
-   ++txn_internal->ws_size;
+   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_INSERT, value);
 
    return 0;
 }
@@ -216,13 +240,7 @@ transactional_splinterdb_delete(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   writable_buffer key_buf;
-   writable_buffer_init_from_slice(&key_buf, 0, key);
-   txn_internal->ws[txn_internal->ws_size].key =
-      writable_buffer_to_slice(&key_buf);
-   txn_internal->ws[txn_internal->ws_size].msg = DELETE_MESSAGE;
-
-   ++txn_internal->ws_size;
+   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_DELETE, NULL_SLICE);
 
    return 0;
 }
@@ -236,16 +254,7 @@ transactional_splinterdb_update(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
-   writable_buffer key_buf;
-   writable_buffer_init_from_slice(&key_buf, 0, key);
-   txn_internal->ws[txn_internal->ws_size].key =
-      writable_buffer_to_slice(&key_buf);
-   writable_buffer delta_buf;
-   writable_buffer_init_from_slice(&delta_buf, 0, delta);
-   txn_internal->ws[txn_internal->ws_size].msg =
-      message_create(MESSAGE_TYPE_UPDATE, writable_buffer_to_slice(&delta_buf));
-
-   ++txn_internal->ws_size;
+   insert_into_write_set(txn_internal, key, MESSAGE_TYPE_UPDATE, delta);
 
    return 0;
 }
@@ -270,11 +279,7 @@ transactional_splinterdb_lookup(transactional_splinterdb *txn_kvsb,
          merge_accumulator_copy_message(&_result->value,
                                         txn_internal->ws[i].msg);
 
-         writable_buffer key_buf;
-         writable_buffer_init_from_slice(&key_buf, 0, key);
-         txn_internal->rs[txn_internal->rs_size].key =
-            writable_buffer_to_slice(&key_buf);
-         ++txn_internal->rs_size;
+         insert_into_read_set(txn_internal, key);
 
          return 0;
       }
@@ -283,11 +288,7 @@ transactional_splinterdb_lookup(transactional_splinterdb *txn_kvsb,
    int rc = splinterdb_lookup(txn_kvsb->kvsb, key, result);
 
    if (splinterdb_lookup_found(result)) {
-      writable_buffer key_buf;
-      writable_buffer_init_from_slice(&key_buf, 0, key);
-      txn_internal->rs[txn_internal->rs_size].key =
-         writable_buffer_to_slice(&key_buf);
-      ++txn_internal->rs_size;
+      insert_into_read_set(txn_internal, key);
    }
 
    return rc;
