@@ -36,25 +36,24 @@ transaction_internal_destroy(transaction_internal **internal_to_delete);
 
 typedef struct transaction_table {
    struct hashmap *table;
-   platform_mutex  lock;
 } transaction_table;
 
 void
-transaction_table_init(transaction_table *active_transactions);
+transaction_table_init(transaction_table *transactions);
 
 void
-transaction_table_deinit(transaction_table *active_transactions);
+transaction_table_deinit(transaction_table *transactions);
 
 void
-transaction_table_insert(transaction_table    *active_transactions,
+transaction_table_insert(transaction_table    *transactions,
                          transaction_internal *txn);
 
 void
-transaction_table_delete(transaction_table    *active_transactions,
+transaction_table_delete(transaction_table    *transactions,
                          transaction_internal *txn);
 
 bool
-transaction_check_for_conflict(transaction_table    *active_transactions,
+transaction_check_for_conflict(transaction_table    *transactions,
                                transaction_internal *txn,
                                const data_config    *cfg);
 
