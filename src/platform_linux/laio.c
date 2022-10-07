@@ -4,7 +4,7 @@
 /*
  * laio.c --
  *
- *     This file contains the inplementation for a libaio wrapper.
+ *     This file contains the implementation for a libaio wrapper.
  */
 
 #define POISON_FROM_PLATFORM_IMPLEMENTATION
@@ -19,36 +19,47 @@
 
 #define LAIO_HAND_BATCH_SIZE 32
 
-platform_status
+static platform_status
 laio_read(io_handle *ioh, void *buf, uint64 bytes, uint64 addr);
-platform_status
+
+static platform_status
 laio_write(io_handle *ioh, void *buf, uint64 bytes, uint64 addr);
-io_async_req *
+
+static io_async_req *
 laio_get_async_req(io_handle *ioh, bool blocking);
+
 struct iovec *
 laio_get_iovec(io_handle *ioh, io_async_req *req);
-void *
+
+static void *
 laio_get_metadata(io_handle *ioh, io_async_req *req);
-platform_status
+
+static platform_status
 laio_read_async(io_handle     *ioh,
                 io_async_req  *req,
                 io_callback_fn callback,
                 uint64         count,
                 uint64         addr);
-platform_status
+
+static platform_status
 laio_write_async(io_handle     *ioh,
                  io_async_req  *req,
                  io_callback_fn callback,
                  uint64         count,
                  uint64         addr);
-void
+
+static void
 laio_cleanup(io_handle *ioh, uint64 count);
-void
+
+static void
 laio_cleanup_all(io_handle *ioh);
 
-io_async_req *
+static io_async_req *
 laio_get_kth_req(laio_handle *io, uint64 k);
 
+/*
+ * Define an implementation of the abstract IO Ops interface methods.
+ */
 static io_ops laio_ops = {
    .read          = laio_read,
    .write         = laio_write,
@@ -146,14 +157,27 @@ io_handle_deinit(laio_handle *io)
 
    status = close(io->fd);
    if (status != 0) {
-      platform_error_log("close failed with error: %s\n", strerror(errno));
+      platform_error_log("close failed, status=%d, with error %d: %s\n",
+                         status,
+                         errno,
+                         strerror(errno));
    }
    platform_assert(status == 0);
 
    platform_free(io->heap_id, io->req);
 }
 
-platform_status
+/*
+ * laio_read() - Basically a wrapper around pread().
+ *
+ * RESOLVE: See https://man7.org/linux/man-pages/man2/pread.2.html
+ * The pread() and pwrite() system calls are especially useful in
+       multithreaded applications.  They allow multiple threads to
+       perform I/O on the same file descriptor without being affected by
+       changes to the file offset by other threads.
+ *
+ */
+static platform_status
 laio_read(io_handle *ioh, void *buf, uint64 bytes, uint64 addr)
 {
    laio_handle *io;
@@ -169,7 +193,7 @@ laio_read(io_handle *ioh, void *buf, uint64 bytes, uint64 addr)
    return STATUS_IO_ERROR;
 }
 
-platform_status
+static platform_status
 laio_write(io_handle *ioh, void *buf, uint64 bytes, uint64 addr)
 {
    laio_handle *io;
@@ -180,10 +204,12 @@ laio_write(io_handle *ioh, void *buf, uint64 bytes, uint64 addr)
    if (ret == bytes) {
       return STATUS_OK;
    }
+   // Return # of bytes written, for diagnostics.
+   ioh->nbytes_rw = ret;
    return STATUS_IO_ERROR;
 }
 
-io_async_req *
+static io_async_req *
 laio_get_kth_req(laio_handle *io, uint64 k)
 {
    char  *cursor;
@@ -195,7 +221,7 @@ laio_get_kth_req(laio_handle *io, uint64 k)
    return (io_async_req *)(cursor + k * req_size);
 }
 
-io_async_req *
+static io_async_req *
 laio_get_async_req(io_handle *ioh, bool blocking)
 {
    laio_handle   *io;
@@ -229,7 +255,7 @@ laio_get_iovec(io_handle *ioh, io_async_req *req)
    return req->iovec;
 }
 
-void *
+static void *
 laio_get_metadata(io_handle *ioh, io_async_req *req)
 {
    return req->metadata;
@@ -247,7 +273,7 @@ laio_callback(io_context_t ctx, struct iocb *iocb, long res, long res2)
    req->busy = FALSE;
 }
 
-platform_status
+static platform_status
 laio_read_async(io_handle     *ioh,
                 io_async_req  *req,
                 io_callback_fn callback,
@@ -273,7 +299,7 @@ laio_read_async(io_handle     *ioh,
    return STATUS_OK;
 }
 
-platform_status
+static platform_status
 laio_write_async(io_handle     *ioh,
                  io_async_req  *req,
                  io_callback_fn callback,
@@ -299,7 +325,7 @@ laio_write_async(io_handle     *ioh,
    return STATUS_OK;
 }
 
-void
+static void
 laio_cleanup(io_handle *ioh, uint64 count)
 {
    laio_handle    *io;
@@ -326,7 +352,7 @@ laio_cleanup(io_handle *ioh, uint64 count)
    }
 }
 
-void
+static void
 laio_cleanup_all(io_handle *ioh)
 {
    laio_handle  *io;
