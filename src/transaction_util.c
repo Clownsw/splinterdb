@@ -64,22 +64,19 @@ transaction_internal_destroy(transaction_internal **internal_to_delete)
    }
 
    platform_free(0, *internal_to_delete);
-   internal_to_delete = NULL;
+   *internal_to_delete = NULL;
 }
 
 static int
 transaction_compare(const void *a, const void *b, void *arg)
 {
-   const transaction_internal **ta = (const transaction_internal **)a;
-   const transaction_internal **tb = (const transaction_internal **)b;
-   return (*ta)->start_tn < (*tb)->start_tn;
+   return *(uint64 *)a - *(uint64 *)b;
 }
 
 uint64_t
 transaction_hash(const void *item, uint64_t seed0, uint64_t seed1)
 {
-   const transaction_internal **txn = (const transaction_internal **)item;
-   return hashmap_sip(*txn, sizeof(transaction_internal *), seed0, seed1);
+   return hashmap_sip(item, sizeof(transaction_internal *), seed0, seed1);
 }
 
 void
@@ -96,16 +93,39 @@ transaction_table_init(transaction_table *transactions)
 }
 
 void
+transaction_table_init_from_table(transaction_table       *transactions,
+                                  const transaction_table *other)
+{
+   transaction_table_init(transactions);
+   transaction_table_insert_table(transactions, other);
+}
+
+void
 transaction_table_deinit(transaction_table *transactions)
 {
    hashmap_free(transactions->table);
+   transactions->table = NULL;
 }
 
 void
 transaction_table_insert(transaction_table    *transactions,
                          transaction_internal *txn)
 {
-   hashmap_set(transactions->table, &txn);
+   if (hashmap_set(transactions->table, &txn) == NULL) {
+      platform_assert(!hashmap_oom(transactions->table));
+   }
+}
+
+void
+transaction_table_insert_table(transaction_table       *transactions,
+                               const transaction_table *other)
+{
+   uint64 iter = 0;
+   void  *item = NULL;
+
+   while (hashmap_iter(other->table, &iter, &item)) {
+      transaction_table_insert(transactions, *(transaction_internal **)item);
+   }
 }
 
 void
@@ -124,30 +144,51 @@ transaction_check_for_conflict(transaction_table    *transactions,
    void  *item = NULL;
 
    while (hashmap_iter(transactions->table, &iter, &item)) {
-      const transaction_internal *txn2 = *((const transaction_internal **)item);
-      if (txn->start_tn >= txn2->tn || txn->finish_tn < txn2->tn) {
+      transaction_internal *txn_i = *((transaction_internal **)item);
+      if (txn->start_tn >= txn_i->tn || txn->finish_tn < txn_i->tn) {
          continue;
       }
 
-      for (uint64 i = 0; i < txn->rs_size; ++i) {
-         for (uint64 j = 0; j < txn2->ws_size; ++j) {
-            if (data_key_compare(cfg, txn->rs[i].key, txn2->ws[j].key) == 0) {
+      for (uint64 i = 0; i < txn_i->rs_size; ++i) {
+         for (uint64 j = 0; j < txn->ws_size; ++j) {
+            if (data_key_compare(cfg, txn_i->rs[i].key, txn->ws[j].key) == 0) {
                return FALSE;
             }
          }
       }
-
-
-      // XXX: Do not need to detect write-write conflict?
-      // for (uint64 i = 0; i < txn->ws_size; ++i) {
-      //    for (uint64 j = 0; j < txn2->ws_size; ++j) {
-      //       if (data_key_compare(cfg, txn->ws[i].key, txn2->ws[j].key) == 0)
-      //       {
-      //             return FALSE;
-      //       }
-      //    }
-      // }
    }
 
    return TRUE;
 }
+
+#ifdef PARALLEL_VALIDATION
+// TODO: rename to the general
+bool
+transaction_check_for_conflict_with_active_transactions(
+   transaction_internal *txn,
+   const data_config    *cfg)
+{
+   uint64 iter = 0;
+   void  *item = NULL;
+
+   while (hashmap_iter(txn->finish_active_transactions.table, &iter, &item)) {
+      transaction_internal *txn_i = *((transaction_internal **)item);
+
+      for (uint64 i = 0; i < txn_i->ws_size; ++i) {
+         for (uint64 j = 0; j < txn->rs_size; ++j) {
+            if (data_key_compare(cfg, txn_i->ws[i].key, txn->rs[j].key) == 0) {
+               return FALSE;
+            }
+         }
+
+         for (uint64 j = 0; j < txn->ws_size; ++j) {
+            if (data_key_compare(cfg, txn_i->ws[i].key, txn->ws[j].key) == 0) {
+               return FALSE;
+            }
+         }
+      }
+   }
+
+   return TRUE;
+}
+#endif

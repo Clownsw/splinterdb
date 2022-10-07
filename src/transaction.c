@@ -14,6 +14,10 @@ typedef struct transactional_splinterdb {
    atomic_counter                   ts_allocator;
    transaction_table                all_transactions;
    platform_mutex                   lock;
+
+#ifdef PARALLEL_VALIDATION
+   transaction_table active_transactions;
+#endif
 } transactional_splinterdb;
 
 static int
@@ -40,6 +44,9 @@ transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,
 
    atomic_counter_init(&_txn_kvsb->ts_allocator);
    transaction_table_init(&_txn_kvsb->all_transactions);
+#ifdef PARALLEL_VALIDATION
+   transaction_table_init(&_txn_kvsb->active_transactions);
+#endif
    platform_mutex_init(&_txn_kvsb->lock, 0, 0);
 
    *txn_kvsb = _txn_kvsb;
@@ -68,6 +75,9 @@ transactional_splinterdb_close(transactional_splinterdb **txn_kvsb)
    splinterdb_close(&_txn_kvsb->kvsb);
 
    platform_mutex_destroy(&_txn_kvsb->lock);
+#ifdef PARALLEL_VALIDATION
+   transaction_table_deinit(&_txn_kvsb->active_transactions);
+#endif
    transaction_table_deinit(&_txn_kvsb->all_transactions);
    atomic_counter_deinit(&_txn_kvsb->ts_allocator);
 
@@ -144,10 +154,59 @@ transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
    transaction_internal *txn_internal = txn->internal;
    platform_assert(txn_internal != NULL);
 
+
+#ifdef PARALLEL_VALIDATION
    platform_mutex_lock(&txn_kvsb->lock);
 
    txn_internal->finish_tn =
       atomic_counter_get_current(&txn_kvsb->ts_allocator);
+
+   transaction_table_init_from_table(&txn_internal->finish_active_transactions,
+                                     &txn_kvsb->active_transactions);
+   transaction_table_insert(&txn_kvsb->active_transactions, txn_internal);
+
+   platform_mutex_unlock(&txn_kvsb->lock);
+
+   bool valid =
+      transaction_check_for_conflict(&txn_kvsb->all_transactions,
+                                     txn_internal,
+                                     txn_kvsb->tcfg->kvsb_cfg.data_cfg);
+   if (!valid) {
+      valid = transaction_check_for_conflict_with_active_transactions(
+         txn_internal, txn_kvsb->tcfg->kvsb_cfg.data_cfg);
+   }
+
+
+   if (valid) {
+      // The new transaction finally becomes visible globally
+      write_into_splinterdb(txn_kvsb, txn_internal);
+
+      platform_mutex_lock(&txn_kvsb->lock);
+
+      transaction_table_insert(&txn_kvsb->all_transactions, txn_internal);
+      txn_internal->tn = atomic_counter_get_next(&txn_kvsb->ts_allocator);
+      transaction_table_delete(&txn_kvsb->active_transactions, txn_internal);
+
+      platform_mutex_unlock(&txn_kvsb->lock);
+   } else {
+      platform_mutex_lock(&txn_kvsb->lock);
+
+      transaction_table_delete(&txn_kvsb->active_transactions, txn_internal);
+
+      platform_mutex_unlock(&txn_kvsb->lock);
+
+      transaction_table_deinit(&txn_internal->finish_active_transactions);
+      transaction_internal_destroy((transaction_internal **)&txn->internal);
+      return -1;
+   }
+
+   return 0;
+#else
+   platform_mutex_lock(&txn_kvsb->lock);
+
+   txn_internal->finish_tn =
+      atomic_counter_get_current(&txn_kvsb->ts_allocator);
+
    bool valid =
       transaction_check_for_conflict(&txn_kvsb->all_transactions,
                                      txn_internal,
@@ -155,9 +214,9 @@ transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
 
    if (valid) {
       // The new transaction finally becomes visible globally
+      write_into_splinterdb(txn_kvsb, txn_internal);
       transaction_table_insert(&txn_kvsb->all_transactions, txn_internal);
 
-      write_into_splinterdb(txn_kvsb, txn_internal);
       txn_internal->tn = atomic_counter_get_next(&txn_kvsb->ts_allocator);
    }
 
@@ -171,6 +230,7 @@ transactional_splinterdb_commit(transactional_splinterdb *txn_kvsb,
    // TODO: Garbage collection
 
    return 0;
+#endif
 }
 
 int
@@ -194,6 +254,15 @@ insert_into_write_set(transaction_internal *txn_internal,
    // check if there is the same key in its write set
    for (uint64 i = 0; i < txn_internal->ws_size; ++i) {
       if (data_key_compare(cfg, key, txn_internal->ws[i].key) == 0) {
+         writable_buffer key_buf;
+         writable_buffer_init_with_buffer(
+            &key_buf,
+            0,
+            slice_length(txn_internal->ws[i].key),
+            (void *)slice_data(txn_internal->ws[i].key),
+            slice_length(txn_internal->ws[i].key));
+         writable_buffer_copy_slice(&key_buf, key);
+
          if (op == MESSAGE_TYPE_INSERT) {
             writable_buffer value_buf;
             writable_buffer_init_with_buffer(
