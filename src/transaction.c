@@ -1,24 +1,6 @@
-#include "splinterdb/transaction.h"
-#include "atomic_counter.h"
-#include "splinterdb_private.h"
+#include "transaction_private.h"
 #include "transaction_util.h"
 #include "platform_linux/poison.h"
-
-typedef struct transactional_splinterdb_config {
-   splinterdb_config kvsb_cfg;
-} transactional_splinterdb_config;
-
-typedef struct transactional_splinterdb {
-   splinterdb                      *kvsb;
-   transactional_splinterdb_config *tcfg;
-   atomic_counter                   ts_allocator;
-   transaction_table                all_transactions;
-   platform_mutex                   lock;
-
-#ifdef PARALLEL_VALIDATION
-   transaction_table active_transactions;
-#endif
-} transactional_splinterdb;
 
 static int
 transactional_splinterdb_create_or_open(const splinterdb_config   *kvsb_cfg,

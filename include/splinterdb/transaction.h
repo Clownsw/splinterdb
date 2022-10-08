@@ -10,8 +10,6 @@
 
 #include "splinterdb/splinterdb.h"
 
-//#define PARALLEL_VALIDATION
-
 typedef struct transactional_splinterdb transactional_splinterdb;
 
 // Create a new SplinterDB instance, erasing any existing file or block device.

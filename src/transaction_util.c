@@ -1,5 +1,5 @@
 #include "transaction_util.h"
-#include "data_internal.h"
+#include "platform_linux/poison.h"
 
 void
 transaction_internal_create(transaction_internal **new_internal)
@@ -143,6 +143,8 @@ transaction_check_for_conflict(transaction_table    *transactions,
    uint64 iter = 0;
    void  *item = NULL;
 
+   timestamp earliest_start_tn_in_use = UINT64_MAX;
+
    while (hashmap_iter(transactions->table, &iter, &item)) {
       transaction_internal *txn_i = *((transaction_internal **)item);
       if (txn->start_tn >= txn_i->tn || txn->finish_tn < txn_i->tn) {
@@ -155,6 +157,25 @@ transaction_check_for_conflict(transaction_table    *transactions,
                return FALSE;
             }
          }
+      }
+
+      bool is_active_txn = txn_i->start_tn > 0 && txn_i->tn == 0;
+      if (is_active_txn) {
+         earliest_start_tn_in_use =
+            MIN(earliest_start_tn_in_use, txn_i->start_tn);
+      }
+   }
+
+   // GC
+
+   iter = 0;
+   item = NULL;
+
+   while (hashmap_iter(transactions->table, &iter, &item)) {
+      transaction_internal *txn_i      = *((transaction_internal **)item);
+      bool                  need_to_gc = txn_i->tn < earliest_start_tn_in_use;
+      if (need_to_gc) {
+         hashmap_delete(transactions->table, &txn_i);
       }
    }
 

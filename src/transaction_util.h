@@ -4,38 +4,7 @@
 #ifndef _TRANSACTION_UTIL_H_
 #define _TRANSACTION_UTIL_H_
 
-#include "splinterdb/public_platform.h"
-#include "splinterdb/data.h"
-#include "splinterdb/transaction.h"
-#include "hashmap.h"
-#include "platform.h"
-
-#define TRANSACTION_RW_SET_MAX 16
-
-typedef struct transaction_rw_set_entry {
-   slice   key;
-   message msg;
-} transaction_rw_set_entry;
-
-typedef struct transaction_table {
-   struct hashmap *table;
-} transaction_table;
-
-typedef struct transaction_internal {
-   timestamp start_tn;
-   timestamp finish_tn;
-   timestamp tn;
-
-   transaction_rw_set_entry rs[TRANSACTION_RW_SET_MAX];
-   transaction_rw_set_entry ws[TRANSACTION_RW_SET_MAX];
-
-   uint64 rs_size;
-   uint64 ws_size;
-
-#ifdef PARALLEL_VALIDATION
-   transaction_table finish_active_transactions;
-#endif
-} transaction_internal;
+#include "transaction_private.h"
 
 void
 transaction_internal_create(transaction_internal **new_internal);
