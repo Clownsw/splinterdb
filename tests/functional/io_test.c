@@ -2,35 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /*
- * io_test.c --
- *
- *     This file tests the IO sub-system interfaces used by SplinterDB.
- */
-
-#include "platform.h"
-#include "config.h"
-#include "io.h"
-
-// Function prototypes
-static platform_status
-test_sync_writes(platform_heap_id    hid,
-                 io_config          *io_cfgp,
-                 platform_io_handle *io_hdlp,
-                 uint64              start_addr,
-                 uint64              end_addr,
-                 char                stamp_char);
-
-static platform_status
-test_sync_reads(platform_heap_id    hid,
-                io_config          *io_cfgp,
-                platform_io_handle *io_hdlp,
-                uint64              start_addr,
-                uint64              end_addr,
-                char                stamp_char);
-
-/*
  * ----------------------------------------------------------------------------
- * splinter_io_test() - Entry point 'main' for SplinterDB IO sub-system testing.
+ * io_test.c --
  *
  * This test exercises core IO interfaces that are used by SplinterDB
  * to verify that these interfaces work as expected when executed:
@@ -51,6 +24,74 @@ test_sync_reads(platform_heap_id    hid,
  *   sections of the file to each thread. Each thread verifies previously
  *   written data using sync-read. Then, each thread writes new data to its
  *   section using sync-writes, and verifies using sync-reads.
+ * ----------------------------------------------------------------------------
+ */
+
+#include "platform.h"
+#include "config.h"
+#include "io.h"
+#include "trunk.h" // Needed for trunk_get_scratch_size()
+#include "task.h"
+
+/*
+ * Structure to package arguments needed by test-case functions, supplied by
+ * worker functions invoked by pthreads.
+ */
+typedef struct io_test_fn_args {
+   platform_heap_id    arg_hid;
+   io_config          *arg_io_cfgp;
+   platform_io_handle *arg_io_hdlp;
+   task_system        *arg_tasks;
+   uint64              arg_start_addr;
+   uint64              arg_end_addr;
+   char                arg_stamp_char;
+   platform_thread     arg_thread;
+} io_test_fn_args;
+
+/*
+ * Different test cases in this test drive multiple threads each doing one
+ * type of activity. Declare the interface of such thread handler functions.
+ */
+typedef void (*test_io_thread_hdlr)(void *arg);
+
+/* Use hard-coded # of threads to avoid allocating memory for thread-specific
+ * arrays of parameters.
+ */
+#define NUM_THREADS 5
+
+// Function prototypes
+static platform_status
+test_sync_writes(platform_heap_id    hid,
+                 io_config          *io_cfgp,
+                 platform_io_handle *io_hdlp,
+                 uint64              start_addr,
+                 uint64              end_addr,
+                 char                stamp_char);
+
+static platform_status
+test_sync_reads(platform_heap_id    hid,
+                io_config          *io_cfgp,
+                platform_io_handle *io_hdlp,
+                uint64              start_addr,
+                uint64              end_addr,
+                char                stamp_char);
+
+static platform_status
+test_sync_write_reads_by_threads(io_test_fn_args *io_test_param, int nthreads);
+
+static platform_status
+do_n_thread_creates(const char         *thread_type,
+                    uint64              num_threads,
+                    io_test_fn_args    *params,
+                    test_io_thread_hdlr thread_hdlr);
+
+void
+test_sync_writes_worker(void *arg);
+
+
+/*
+ * ----------------------------------------------------------------------------
+ * splinter_io_test() - Entry point 'main' for SplinterDB IO sub-system testing.
  * ----------------------------------------------------------------------------
  */
 int
@@ -111,9 +152,32 @@ splinter_io_test(int argc, char *argv[])
 
    // Basic exercise of sync write / read APIs, from main thread.
    test_sync_writes(hid, &io_cfg, io_handle, start_addr, end_addr, 'a');
-   test_sync_reads(hid,  &io_cfg, io_handle, start_addr, end_addr, 'a');
+   test_sync_reads(hid, &io_cfg, io_handle, start_addr, end_addr, 'a');
 
-   test_sync_write_reads_across_threads();
+   /*
+    * Setup the task system which is needed for testing with threads.
+    */
+   task_system *tasks                          = NULL;
+   uint8        num_bg_threads[NUM_TASK_TYPES] = {0};
+
+   rc = task_system_create(hid,
+                           io_handle,
+                           &tasks,
+                           TRUE,  // Use statistics,
+                           FALSE, // Background threads are off
+                           num_bg_threads,
+                           trunk_get_scratch_size());
+
+   // Change the char to write so we can tell apart from previous contents.
+   io_test_fn_args io_test_fn_arg = {.arg_hid        = hid,
+                                     .arg_io_cfgp    = &io_cfg,
+                                     .arg_io_hdlp    = io_handle,
+                                     .arg_tasks      = tasks,
+                                     .arg_start_addr = start_addr,
+                                     .arg_end_addr   = end_addr,
+                                     .arg_stamp_char = 'A'};
+
+   test_sync_write_reads_by_threads(&io_test_fn_arg, NUM_THREADS);
 
 io_free:
    platform_free(hid, io_handle);
@@ -191,6 +255,24 @@ free_buf:
 
 /*
  * -----------------------------------------------------------------------------
+ * test_sync_writes_worker() - Shell worker function invoked by threads which
+ * calls test_sync_writes().
+ * -----------------------------------------------------------------------------
+ */
+void
+test_sync_writes_worker(void *arg)
+{
+   io_test_fn_args *argp = (io_test_fn_args *)arg;
+   test_sync_writes(argp->arg_hid,
+                    argp->arg_io_cfgp,
+                    argp->arg_io_hdlp,
+                    argp->arg_start_addr,
+                    argp->arg_end_addr,
+                    argp->arg_stamp_char);
+}
+
+/*
+ * -----------------------------------------------------------------------------
  * test_sync_reads() - Read a swath of disk using page-sized sync-read IO.
  *
  * This routine is used to verify that basic sync-read API works as expected.
@@ -263,4 +345,133 @@ free_buf:
    platform_free(hid, buf);
    platform_free(hid, exp);
    return rc;
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * test_sync_reads_worker() - Shell worker function invoked by threads which
+ * calls test_sync_reads().
+ * -----------------------------------------------------------------------------
+ */
+void
+test_sync_reads_worker(void *arg)
+{
+   io_test_fn_args *argp = (io_test_fn_args *)arg;
+   test_sync_reads(argp->arg_hid,
+                   argp->arg_io_cfgp,
+                   argp->arg_io_hdlp,
+                   argp->arg_start_addr,
+                   argp->arg_end_addr,
+                   argp->arg_stamp_char);
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * test_sync_write_reads_by_threads() --
+ *
+ * Driver function to exercise IO write / read APIs when executed by n-threads.
+ * The input specifies the start / end address of the disk which is available
+ * for IO. This is segmented into n-contiguous chunks and assigned to n-threads.
+ * Each thread will first do the writes, and each thread will read back the
+ * data it wrote, to verify that the contents are correct.
+ * -----------------------------------------------------------------------------
+ */
+static platform_status
+test_sync_write_reads_by_threads(io_test_fn_args *io_test_param, int nthreads)
+{
+   // The input gives start / end addresses of the disk to use for IO testing.
+   // Carve this into somewhat equal chunks, across page boundaries, with the
+   // very last thread possibly getting few pages to do IO on. That's ok.
+   uint64 start_addr = io_test_param->arg_start_addr;
+   uint64 end_addr   = io_test_param->arg_end_addr;
+   int    page_size  = (int)io_test_param->arg_io_cfgp->page_size;
+
+   // # of pages allocated to each thread.
+   uint64 npages = ((end_addr - start_addr) / page_size) / nthreads;
+
+   io_test_fn_args thread_params[NUM_THREADS];
+   ZERO_ARRAY(thread_params);
+
+   platform_default_log("Executing %s, for %d threads, %lu pages/thread ...\n",
+                        __FUNCTION__,
+                        nthreads,
+                        npages);
+
+   io_test_fn_args *param = thread_params;
+   for (int i = 0; i < nthreads; i++, param++) {
+      param->arg_hid     = io_test_param->arg_hid;
+      param->arg_io_cfgp = io_test_param->arg_io_cfgp;
+      param->arg_io_hdlp = io_test_param->arg_io_hdlp;
+      param->arg_tasks   = io_test_param->arg_tasks;
+
+      // Set up the start/end address of the chunk of device for this thread
+      // The last thread's end will be the devices end, which may happen if
+      // device size cannot be uniformly divided into equal # of pages.
+      end_addr              = (start_addr + (npages * page_size));
+      param->arg_start_addr = start_addr;
+      param->arg_end_addr =
+         (i == (nthreads - 1)) ? io_test_param->arg_end_addr : end_addr;
+
+      // Reset start of the next chunk for next thread to work on
+      start_addr = end_addr;
+
+      param->arg_stamp_char = io_test_param->arg_stamp_char;
+   }
+
+   /*
+    * Execute the n-threads doing sync-writes on their disk pieces.
+    */
+   platform_status rc = do_n_thread_creates(
+      "write_threads", nthreads, thread_params, test_sync_writes_worker);
+   if (!SUCCESS(rc)) {
+      return rc;
+   }
+
+   for (int i = 0; i < nthreads; i++) {
+      platform_thread_join(thread_params[i].arg_thread);
+   }
+
+   /*
+    * Execute the n-threads doing sync-reads from their disk pieces.
+    */
+   rc = do_n_thread_creates(
+      "read_threads", nthreads, thread_params, test_sync_reads_worker);
+   if (!SUCCESS(rc)) {
+      return rc;
+   }
+
+   for (int i = 0; i < nthreads; i++) {
+      platform_thread_join(thread_params[i].arg_thread);
+   }
+
+   return rc;
+}
+
+
+/*
+ * do_n_thread_creates() --
+ *
+ * Helper function to create n-threads, each thread executing the specified
+ * thread_hdlr handler function. [ Copied from splinter_test.c!! ]
+ */
+static platform_status
+do_n_thread_creates(const char         *thread_type,
+                    uint64              num_threads,
+                    io_test_fn_args    *params,
+                    test_io_thread_hdlr thread_hdlr)
+{
+   platform_status ret;
+   for (uint64 i = 0; i < num_threads; i++) {
+      ret = task_thread_create(thread_type,
+                               thread_hdlr,
+                               &params[i],
+                               trunk_get_scratch_size(),
+                               params[i].arg_tasks,
+                               params[i].arg_hid,
+                               &params[i].arg_thread);
+      if (!SUCCESS(ret)) {
+         return ret;
+      }
+   }
+   return ret;
 }
